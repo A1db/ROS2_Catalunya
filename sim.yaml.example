@@ -1,0 +1,11 @@
+# F1TENTH gym_ros bridge (config/sim.yaml): spawn the car ON the Catalunya start line, facing along the track.
+# The old spawn (quaternion w=0, z=1 => yaw = 180 deg) points the car at a wall 1.4 m ahead.
+# Catalunya start = first centerline point, heading = direction of the first centerline segment.
+bridge:
+  ros__parameters:
+    map_path: '/ABSOLUTE/PATH/TO/Catalunya_map'   # without extension; Catalunya_map.yaml + .png next to it
+    map_img_ext: '.png'
+    sx: 0.0
+    sy: 0.0
+    stheta: -2.14363          # rad  (= quaternion z=-0.8777, w=0.4793)
+    # keep the rest of your file as it is (scan_fov 4.7, scan_beams 1080, wheelbase 0.3302, ...)

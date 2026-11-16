@@ -1,0 +1,28 @@
+{
+  "aggr": 0.63,
+  "best_clean": 0.63,
+  "best_clean_lap_time": 71.06201148033142,
+  "ceiling": 0.63,
+  "history": [
+    {
+      "aggr": 0.6,
+      "lap_time": 74.357,
+      "collisions": 0
+    },
+    {
+      "aggr": 0.6,
+      "lap_time": 73.574,
+      "collisions": 0
+    },
+    {
+      "aggr": 0.6,
+      "lap_time": 73.607,
+      "collisions": 0
+    },
+    {
+      "aggr": 0.63,
+      "lap_time": 71.062,
+      "collisions": 0
+    }
+  ]
+}

@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import rclpy
+import time
 from rclpy.node import Node
 
 from sensor_msgs.msg import LaserScan
@@ -57,6 +58,7 @@ class GymBridge(Node):
         self.declare_parameter('scan_distance_to_base_link', 0.0)  # Tipo 'float' con valor predeterminado
         self.declare_parameter('scan_fov', 0.0)  # Tipo 'float' con valor predeterminado
         self.declare_parameter('scan_beams', 0)  # Tipo 'int' con valor predeterminado
+        self.declare_parameter('scan_range_max', 12.0)
 
         self.declare_parameter('map_path', '')  # Tipo 'str' con valor predeterminado vacío
         self.declare_parameter('map_img_ext', '')  # Tipo 'str' con valor predeterminado vacío
@@ -72,6 +74,7 @@ class GymBridge(Node):
         self.declare_parameter('stheta1', 0.0)  # Tipo 'float' con valor predeterminado
 
         self.declare_parameter('kb_teleop', False)  # Tipo 'bool' con valor predeterminado
+        self.declare_parameter('command_timeout', 0.5)
 
 
 
@@ -95,6 +98,8 @@ class GymBridge(Node):
         self.ego_speed = [0.0, 0.0, 0.0]
         self.ego_requested_speed = 0.0
         self.ego_steer = 0.0
+        self.ego_command_time = None
+        self.ego_timeout_logged = False
         self.ego_collision = False
         ego_scan_topic = self.get_parameter('ego_scan_topic').value
         ego_drive_topic = self.get_parameter('ego_drive_topic').value
@@ -102,7 +107,14 @@ class GymBridge(Node):
         scan_beams = self.get_parameter('scan_beams').value
         self.angle_min = -scan_fov / 2.
         self.angle_max = scan_fov / 2.
-        self.angle_inc = scan_fov / scan_beams
+        if scan_beams < 2:
+            raise ValueError('scan_beams must be at least 2.')
+        # LaserScan has N samples including both endpoints, so the angular spacing
+        # is the field of view divided by N - 1.
+        self.angle_inc = scan_fov / (scan_beams - 1)
+        self.scan_range_max = float(self.get_parameter('scan_range_max').value)
+        if not np.isfinite(self.scan_range_max) or self.scan_range_max <= 0.0:
+            raise ValueError('scan_range_max must be a positive finite value.')
         self.ego_namespace = self.get_parameter('ego_namespace').value
         ego_odom_topic = self.ego_namespace + '/' + self.get_parameter('ego_odom_topic').value
         self.scan_distance_to_base_link = self.get_parameter('scan_distance_to_base_link').value
@@ -117,6 +129,8 @@ class GymBridge(Node):
             self.opp_speed = [0.0, 0.0, 0.0]
             self.opp_requested_speed = 0.0
             self.opp_steer = 0.0
+            self.opp_command_time = None
+            self.opp_timeout_logged = False
             self.opp_collision = False
             self.obs, _ , self.done, _ = self.env.reset(np.array([[sx, sy, stheta], [sx1, sy1, stheta1]]))
             self.ego_scan = list(self.obs['scans'][0])
@@ -145,6 +159,9 @@ class GymBridge(Node):
         self.ego_scan_pub = self.create_publisher(LaserScan, ego_scan_topic, 10)
         self.ego_odom_pub = self.create_publisher(Odometry, ego_odom_topic, 10)
         self.ego_drive_published = False
+        self.command_timeout = float(self.get_parameter('command_timeout').value)
+        if self.command_timeout <= 0.0:
+            raise ValueError('command_timeout must be greater than zero.')
         if num_agents == 2:
             self.opp_scan_pub = self.create_publisher(LaserScan, opp_scan_topic, 10)
             self.ego_opp_odom_pub = self.create_publisher(Odometry, ego_opp_odom_topic, 10)
@@ -187,11 +204,15 @@ class GymBridge(Node):
         self.ego_requested_speed = drive_msg.drive.speed
         self.ego_steer = drive_msg.drive.steering_angle
         self.ego_drive_published = True
+        self.ego_command_time = time.monotonic()
+        self.ego_timeout_logged = False
 
     def opp_drive_callback(self, drive_msg):
         self.opp_requested_speed = drive_msg.drive.speed
         self.opp_steer = drive_msg.drive.steering_angle
         self.opp_drive_published = True
+        self.opp_command_time = time.monotonic()
+        self.opp_timeout_logged = False
 
     def ego_reset_callback(self, pose_msg):
         rx = pose_msg.pose.pose.position.x
@@ -229,12 +250,38 @@ class GymBridge(Node):
             self.ego_steer = -0.3
         else:
             self.ego_steer = 0.0
+        self.ego_command_time = time.monotonic()
+        self.ego_timeout_logged = False
 
     def drive_timer_callback(self):
-        if self.ego_drive_published and not self.has_opp:
-            self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed]]))
-        elif self.ego_drive_published and self.has_opp and self.opp_drive_published:
-            self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed], [self.opp_steer, self.opp_requested_speed]]))
+        now = time.monotonic()
+        ego_active = (self.ego_command_time is not None and
+                      now - self.ego_command_time <= self.command_timeout)
+        if self.ego_drive_published and not ego_active:
+            self.ego_requested_speed, self.ego_steer = 0.0, 0.0
+            if not self.ego_timeout_logged:
+                self.get_logger().warn('Ego drive command timed out; commanding a stop.')
+                self.ego_timeout_logged = True
+
+        if self.has_opp:
+            opp_active = (self.opp_command_time is not None and
+                          now - self.opp_command_time <= self.command_timeout)
+            if self.opp_drive_published and not opp_active:
+                self.opp_requested_speed, self.opp_steer = 0.0, 0.0
+                if not self.opp_timeout_logged:
+                    self.get_logger().warn('Opponent drive command timed out; commanding a stop.')
+                    self.opp_timeout_logged = True
+
+            if self.ego_drive_published or self.opp_drive_published:
+                ego_action = ([self.ego_steer, self.ego_requested_speed]
+                              if ego_active else [0.0, 0.0])
+                opp_action = ([self.opp_steer, self.opp_requested_speed]
+                              if opp_active else [0.0, 0.0])
+                self.obs, _, self.done, _ = self.env.step(np.array([ego_action, opp_action]))
+        elif self.ego_drive_published:
+            self.obs, _, self.done, _ = self.env.step(
+                np.array([[self.ego_steer, self.ego_requested_speed]
+                          if ego_active else [0.0, 0.0]]))
         self._update_sim_state()
 
     def timer_callback(self):
@@ -248,8 +295,11 @@ class GymBridge(Node):
         scan.angle_max = self.angle_max
         scan.angle_increment = self.angle_inc
         scan.range_min = 0.
-        scan.range_max = 30.
-        scan.ranges = self.ego_scan
+        scan.range_max = self.scan_range_max
+        scan.ranges = np.clip(
+            np.nan_to_num(np.asarray(self.ego_scan), nan=self.scan_range_max,
+                          posinf=self.scan_range_max, neginf=0.0),
+            0.0, self.scan_range_max).tolist()
         self.ego_scan_pub.publish(scan)
 
         if self.has_opp:
@@ -260,8 +310,11 @@ class GymBridge(Node):
             opp_scan.angle_max = self.angle_max
             opp_scan.angle_increment = self.angle_inc
             opp_scan.range_min = 0.
-            opp_scan.range_max = 30.
-            opp_scan.ranges = self.opp_scan
+            opp_scan.range_max = self.scan_range_max
+            opp_scan.ranges = np.clip(
+                np.nan_to_num(np.asarray(self.opp_scan), nan=self.scan_range_max,
+                              posinf=self.scan_range_max, neginf=0.0),
+                0.0, self.scan_range_max).tolist()
             self.opp_scan_pub.publish(opp_scan)
 
         # pub tf
@@ -414,7 +467,14 @@ class GymBridge(Node):
 def main(args=None):
     rclpy.init(args=args)
     gym_bridge = GymBridge()
-    rclpy.spin(gym_bridge)
+    try:
+        rclpy.spin(gym_bridge)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        gym_bridge.env.close()
+        gym_bridge.destroy_node()
+        rclpy.try_shutdown()
 
 if __name__ == '__main__':
     main()

@@ -21,6 +21,8 @@
 # SOFTWARE.
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch.substitutions import Command
 from ament_index_python.packages import get_package_share_directory
@@ -28,32 +30,42 @@ import os
 import yaml
 
 def generate_launch_description():
-    ld = LaunchDescription()
-    config = os.path.join(
-        get_package_share_directory('f1tenth_gym_ros'),
-        'config',
-        'sim.yaml'
-        )
-    config_dict = yaml.safe_load(open(config, 'r'))
+    package_share = get_package_share_directory('f1tenth_gym_ros')
+    config = os.path.join(package_share, 'config', 'sim.yaml')
+    with open(config, 'r', encoding='utf-8') as config_file:
+        config_dict = yaml.safe_load(config_file)
+    bridge_params = config_dict['bridge']['ros__parameters']
+    map_path = bridge_params['map_path']
+    map_yaml = map_path + '.yaml'
+    if not os.path.isfile(map_yaml):
+        map_path = os.path.join(package_share, 'maps', 'Catalunya_map')
+        map_yaml = map_path + '.yaml'
     has_opp = config_dict['bridge']['ros__parameters']['num_agent'] > 1
-    teleop = config_dict['bridge']['ros__parameters']['kb_teleop']
+
+    rviz_default = os.path.join(package_share, 'launch', 'catalunya.rviz')
+    rviz_config = LaunchConfiguration('rviz_config')
+    ld = LaunchDescription([
+        DeclareLaunchArgument(
+            'rviz_config', default_value=rviz_default,
+            description='RViz configuration file.'),
+    ])
 
     bridge_node = Node(
         package='f1tenth_gym_ros',
         executable='gym_bridge',
         name='bridge',
-        parameters=[config]
+        parameters=[config, {'map_path': map_path}]
     )
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz',
-        arguments=['-d', os.path.join(get_package_share_directory('f1tenth_gym_ros'), 'launch', 'gym_bridge.rviz')]
+        arguments=['-d', rviz_config]
     )
     map_server_node = Node(
         package='nav2_map_server',
         executable='map_server',
-        parameters=[{'yaml_filename': config_dict['bridge']['ros__parameters']['map_path'] + '.yaml'},
+        parameters=[{'yaml_filename': map_yaml},
                     {'topic': 'map'},
                     {'frame_id': 'map'},
                     {'output': 'screen'},
